@@ -580,16 +580,9 @@
             
             if (!messageText && !fileInput.files.length) return;
 
-            // For now, store messages locally (you can add a messages endpoint later)
-            const messages = JSON.parse(localStorage.getItem('rnn_messages') || '[]');
-            const message = {
-                id: Date.now(),
-                author: currentUser.displayName || currentUser.username,
-                text: messageText,
-                timestamp: new Date().toISOString(),
-                media: null
-            };
+            let mediaFileId = null;
 
+            // Upload media first if attached
             if (fileInput.files.length > 0) {
                 const file = fileInput.files[0];
                 if (file.size > 5 * 1024 * 1024) {
@@ -597,7 +590,6 @@
                     return;
                 }
                 
-                // Upload to server
                 try {
                     const formData = new FormData();
                     formData.append('file', file);
@@ -610,83 +602,90 @@
                     
                     if (uploadResponse.ok) {
                         const uploadData = await uploadResponse.json();
-                        message.media = {
-                            name: file.name,
-                            type: file.type,
-                            url: `${API_URL}${uploadData.url}`
-                        };
+                        mediaFileId = uploadData.id;
                     }
                 } catch (err) {
                     console.error('Upload failed:', err);
                 }
             }
 
-            messages.push(message);
-            localStorage.setItem('rnn_messages', JSON.stringify(messages.slice(-100)));
-            
-            document.getElementById('messageText').value = '';
-            fileInput.value = '';
-            loadMessages();
+            // Send message to server
+            try {
+                const response = await fetch(`${API_URL}/api/chat`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        content: messageText,
+                        mediaFileId: mediaFileId
+                    })
+                });
+
+                if (response.ok) {
+                    document.getElementById('messageText').value = '';
+                    fileInput.value = '';
+                    loadMessages();
+                } else {
+                    showToast('Failed to send message');
+                }
+            } catch (err) {
+                console.error('Send failed:', err);
+                showToast('Connection error');
+            }
         }
 
-        function loadMessages() {
-            const messages = JSON.parse(localStorage.getItem('rnn_messages') || '[]');
+        async function loadMessages() {
             const container = document.getElementById('messagesContainer');
-            const empty = document.getElementById('messagesEmpty');
             
-            if (messages.length === 0) {
-                container.innerHTML = '';
-                container.appendChild(empty);
-                return;
-            }
-            
-            container.innerHTML = messages.map(msg => `
-                <div class="message">
-                    <div class="message-header">
-                        <span class="message-author">${msg.author}</span>
-                        <span class="message-time">${new Date(msg.timestamp).toLocaleString()}</span>
-                    </div>
-                    <div class="message-content">${msg.text}</div>
-                    ${msg.media ? `
-                        <div class="message-media">
-                            ${msg.media.type && msg.media.type.startsWith('image/') ? 
-                                `<img src="${msg.media.url || msg.media.data}" alt="${msg.media.name}">` :
-                                `<video src="${msg.media.url || msg.media.data}" controls></video>`
-                            }
+            try {
+                const response = await fetch(`${API_URL}/api/chat`);
+                
+                if (response.ok) {
+                    const messages = await response.json();
+                    
+                    if (messages.length === 0) {
+                        container.innerHTML = `
+                            <div class="empty-state" id="messagesEmpty">
+                                <div class="icon">💬</div>
+                                <p>No messages yet. Start the conversation!</p>
+                            </div>`;
+                        return;
+                    }
+                    
+                    container.innerHTML = messages.map(msg => `
+                        <div class="message">
+                            <div class="message-header">
+                                <span class="message-author">${msg.author}</span>
+                                <span class="message-time">${new Date(msg.createdAt).toLocaleString()}</span>
+                            </div>
+                            <div class="message-content">${msg.content}</div>
+                            ${msg.media ? `
+                                <div class="message-media">
+                                    ${msg.media.contentType.startsWith('image/') ? 
+                                        `<img src="${API_URL}${msg.media.url}" alt="${msg.media.fileName}">` :
+                                        `<video src="${API_URL}${msg.media.url}" controls></video>`
+                                    }
+                                </div>
+                            ` : ''}
                         </div>
-                    ` : ''}
-                </div>
-            `).join('');
-            
-            container.scrollTop = container.scrollHeight;
+                    `).join('');
+                    
+                    container.scrollTop = container.scrollHeight;
+                }
+            } catch (err) {
+                console.error('Failed to load messages:', err);
+                container.innerHTML = '<div class="empty-state"><div class="icon">⚠️</div><p>Failed to load messages</p></div>';
+            }
         }
 
         async function loadMedia() {
             const grid = document.getElementById('mediaGrid');
             const empty = document.getElementById('mediaEmpty');
             
-            // Load from localStorage for now
-            const media = JSON.parse(localStorage.getItem('rnn_media') || '[]');
-            
-            if (media.length === 0) {
-                grid.innerHTML = '';
-                empty.style.display = 'block';
-                return;
-            }
-            
-            empty.style.display = 'none';
-            grid.innerHTML = media.map(item => `
-                <div class="media-item" onclick="window.open('${item.url || item.data}')">
-                    ${item.type.startsWith('image/') ? 
-                        `<img src="${item.url || item.data}" alt="${item.name}">` :
-                        `<video src="${item.url || item.data}"></video>`
-                    }
-                    <div class="media-info">
-                        <div class="media-name">${item.name}</div>
-                        <div class="media-date">${new Date(item.date).toLocaleDateString()}</div>
-                    </div>
-                </div>
-            `).join('');
+            // For now, media is loaded per-message. Gallery shows uploaded files.
+            // You could add a GET /api/media endpoint to list all user uploads
+            grid.innerHTML = '';
+            empty.style.display = 'block';
+            empty.innerHTML = '<div class="icon">📁</div><p>Upload media in chat or drag files here</p>';
         }
 
         async function loadUsers() {
@@ -780,7 +779,6 @@
         });
 
         async function handleMediaFiles(files) {
-            const media = JSON.parse(localStorage.getItem('rnn_media') || '[]');
             let count = 0;
             
             for (const file of Array.from(files)) {
@@ -800,14 +798,6 @@
                     });
                     
                     if (response.ok) {
-                        const data = await response.json();
-                        media.push({
-                            name: file.name,
-                            type: file.type,
-                            url: `${API_URL}${data.url}`,
-                            date: new Date().toISOString(),
-                            uploadedBy: currentUser.username
-                        });
                         count++;
                     }
                 } catch (err) {
@@ -815,8 +805,6 @@
                 }
             }
             
-            localStorage.setItem('rnn_media', JSON.stringify(media));
-            loadMedia();
             if (count > 0) showToast(count + ' file(s) uploaded');
         }
 
